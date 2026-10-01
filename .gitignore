@@ -1,4 +1,4 @@
-﻿# Python cache and compiled files
+# Python cache and compiled files
 __pycache__/
 *.pyc
 *.pyo
@@ -56,3 +56,15 @@ runs/detect/button_yolov8n_fast_baseline/ocr_evaluation_v2/visualizations/
 Thumbs.db
 .vscode/
 .idea/
+
+# Frontend (Next.js)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+
+# Backend API temporary outputs
+output/api_tmp/
+
+# Next.js cache
+.next/

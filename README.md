@@ -1,340 +1,310 @@
-# Lastmile Robotics — Elevator Button Perception System
+# Elevator Vision
 
-An end-to-end computer vision pipeline that detects elevator floor buttons and reads their labels, enabling an autonomous last-mile delivery robot to locate and press the correct floor button.
-
----
-
-## Problem Statement
-
-Autonomous delivery robots operating in multi-story buildings must navigate elevators autonomously. This requires identifying the correct floor button from a camera image of an elevator panel. The system must:
-
-1. Detect all elevator buttons in the camera image.
-2. Read the floor label printed on each button using OCR.
-3. Locate the button matching the requested target floor and report its position.
+> Detect and locate elevator floor buttons using YOLOv8 object detection and EasyOCR -- now with a web interface.
 
 ---
 
-## System Architecture
+## Overview
+
+**Elevator Vision** is a computer vision system that:
+
+1. Detects individual buttons on elevator panels using a custom-trained YOLOv8n model
+2. Runs OCR on each detected button crop to read the floor label
+3. Locates a requested target floor and returns its position, confidence scores, and a visual annotation
+
+This repository contains the original CLI pipeline **plus** a FastAPI backend and Next.js frontend built as a web prototype for an AI-Native Full Stack Developer internship application.
+
+---
+
+## Problem
+
+In elevator automation, robotics, or accessibility applications, a system needs to:
+
+- Identify all buttons on a panel from a camera image
+- Find the button corresponding to a requested floor
+- Return its location so a downstream actuator or UI can act on it
+
+---
+
+## Features
+
+- Button detection -- YOLOv8n trained on a custom elevator panel dataset
+- OCR floor reading -- EasyOCR with multi-pass contrast enhancement
+- Floor locator -- given a target floor label, returns bbox, center, and confidence
+- Annotated output image -- buttons highlighted, target button marked
+- Web interface -- upload image in browser, see results instantly
+- REST API -- POST /api/detect for programmatic access
+- CLI -- original command-line interface still works unchanged
+
+---
+
+## Architecture
 
 ```
-Input image
-    │
-    ▼
-YOLOv8n button detector  (src/detector.py)
-    │  bounding boxes + YOLO confidence
-    ▼
-Per-button crop preprocessing  (src/ocr.py)
-    │  4 px padding · Braille-region masking · 3× upscale · grayscale
-    ▼
-EasyOCR reader.recognize()  — skips CRAFT text detection
-    │  Pass A: unrestricted · Pass B: digit+B allowlist
-    │  Flipped fallback · Contrast-enhanced fallback
-    ▼
-Floor label selection  (src/floor_selector.py)
-    │  normalize → vocabulary match → confidence scoring
-    ▼
-Optional target-floor comparison  (detect_floor.py)
-    │
-    ▼
-Output: target_found, bbox, center, YOLO confidence, OCR confidence
+Browser (Next.js -- port 3000)
+      |
+      |  POST /api/detect  (multipart/form-data: image + target_floor)
+      v
+FastAPI backend (Uvicorn -- port 8000)
+  backend/main.py
+      |
+      |  detect_floor.run(image_path, target_floor, save_dir)
+      v
+Existing inference pipeline (unchanged)
+  detect_floor.py -> src/detector.py (YOLOv8n)
+                  -> src/ocr.py (EasyOCR)
+                  -> src/floor_selector.py
+      |
+      v
+Structured result dict + annotated JPEG saved to disk
+      |
+      v
+FastAPI returns JSON with annotated_image_url field
+      |
+      v  GET /api/result/{filename}
+Frontend fetches and renders annotated image
 ```
-
-**Design decision — skipping CRAFT:** YOLO has already localized each button precisely. Running EasyOCR's CRAFT text-detection network on the crop is redundant and slow. The pipeline calls `reader.recognize()` with an explicit `horizontal_list` covering the entire preprocessed crop, bypassing CRAFT and running only the recognition network.
 
 ---
 
-## Dataset
-
-**Source:** ACC Elevator Button Dataset (Roboflow `acc-stwam/elevator-button-jinxe-qb0gs v1`, CC BY 4.0)
-
-| Property | Value |
-|---|---|
-| Original images | 1,139 |
-| Original classes | 38 (floors 1–30, B1–B3, Open, Close, Up, Down, Emergency) |
-| Annotation style | YOLO format bounding boxes |
-
-**Why a single `button` class?**
-
-The first pipeline stage is button *localization* — every button is structurally equivalent regardless of its label. Collapsing all 38 semantic classes into a single class maximizes training samples, simplifies the detector, and cleanly separates localization (YOLO) from recognition (OCR). The original 38-class labels are preserved in `dataset_button/original_labels/` for evaluation purposes.
-
-**Dataset preparation** (`dataset_button/`):
-
-- All 38 classes remapped to class 0 (`button`)
-- 2 geometrically degenerate annotations removed
-- 6 orphaned label files (no matching image) excluded
-- Stratified 80/10/10 split using a greedy rarity-first strategy so all 38 original classes appear in every split
-
-| Split | Images | Annotations |
-|---|---|---|
-| Train | 907 | 5,258 |
-| Validation | 113 | 780 |
-| Test | 113 | 761 |
-
-See `dataset_button/preparation_report.md` for full details.
-
----
-
-## Model
-
-| Property | Value |
-|---|---|
-| Architecture | YOLOv8n (nano) |
-| Parameters | 3.0 M |
-| GFLOPs | 8.2 |
-| Pre-trained weights | Official `yolov8n.pt` (COCO) |
-| Classes | 1 (`button`) |
-| Input size | 512 × 512 |
-| Trained weights | `models/best.pt` |
-
----
-
-## Training
-
-| Parameter | Value |
-|---|---|
-| Epochs | 30 (early stopping, patience = 8) |
-| Batch size | 8 |
-| Image size | 512 |
-| Optimizer | AdamW (YOLOv8 default) |
-| Augmentation | YOLOv8 default mosaic + geometric augmentation |
-| Seed | 42 |
-| Device | CPU (AMD Ryzen 5 5500U) |
-| Best epoch | 21 |
-
-**Validation metrics (best epoch):**
-
-| Metric | Value |
-|---|---|
-| mAP@50 | 0.9941 |
-| mAP@50-95 | 0.7241 |
-| Precision | 0.9863 |
-| Recall | 0.9923 |
-
-**Test-set metrics (held-out, 113 images, 761 annotations, conf ≥ 0.45):**
-
-| Metric | Value |
-|---|---|
-| Precision | **0.9882** |
-| Recall | **0.9931** |
-| mAP@50 | **0.9915** |
-| mAP@50-95 | **0.7359** |
-
-Full training logs and curves are in `runs/detect/button_yolov8n_fast_baseline/`.
-
----
-
-## OCR Pipeline
-
-**Engine:** EasyOCR (English, CPU)
-
-**Per-button preprocessing:**
-1. 4 px padding clipped to image boundaries
-2. Lower 15% of crop removed (reduces Braille dot interference)
-3. 3× upscaling (bicubic interpolation)
-4. Grayscale conversion
-
-**Recognition passes (4 total):**
-
-| Pass | Orientation | Preprocessing |
-|---|---|---|
-| 1A | Original | Plain grayscale |
-| 1B | Original | Plain grayscale + digit/B allowlist |
-| 2A | Horizontally flipped | Plain grayscale |
-| 2B | Horizontally flipped | Plain grayscale + digit/B allowlist |
-
-If none of the above yields a high-confidence match, contrast-enhanced variants (alpha=1.4) of both orientations are tried as a fallback.
-
-**EasyOCR API note:** `reader.recognize()` is called with `horizontal_list` constructed from the dimensions of the *post-processed crop* (after all resizing), not from the original YOLO bounding box. This ensures the bounding box passed to EasyOCR exactly matches the array being recognized.
-
----
-
-## Floor Label Selection
-
-**Valid floor vocabulary:** integers 1–30, plus `B1`, `B2`, `B3`.
-
-**Selection logic (`src/floor_selector.py`):**
-
-1. Normalize each OCR result: uppercase, strip non-alphanumeric characters.
-2. Filter to candidates whose normalized text is in the floor vocabulary.
-3. Score each valid candidate: `max_confidence + vote_count × 0.1`.
-4. Return the highest-scoring candidate, or `UNREADABLE` if no valid candidate exists.
-
-No hard-coded corrections or per-label special cases are used.
-
----
-
-## Usage
-
-### Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Target-floor detection (main use case)
-
-```bash
-python detect_floor.py --image dataset_button/test/images/<image.jpg> --target-floor "14"
-```
-
-Example output:
-```
-total_buttons_detected=9
-target_floor=14
-target_found=true
-bbox=[120, 80, 245, 205]
-center=[182, 142]
-detection_confidence=0.91
-ocr_confidence=0.94
-ocr_text=14
-annotated_image=<save_dir>/<stem>_annotated.jpg
-```
-
-Save an annotated image:
-```bash
-python detect_floor.py --image path/to/image.jpg --target-floor "14" --save-dir output/
-```
-
-### General inference (all buttons)
-
-```bash
-python inference.py --image path/to/image.jpg [--save path/to/output.jpg]
-```
-
-### 5-image demo (existing experiment)
-
-```bash
-python scripts/demo.py
-```
-
-### Train from scratch
-
-```bash
-python train.py --epochs 30 --imgsz 512 --batch 8
-```
-
-> **Note:** The model has already been trained. `models/best.pt` contains the trained weights. Re-running `train.py` will start a new training run; it will not overwrite `models/best.pt`.
-
----
-
-## Results
-
-> See [EVALUATION_REPORT.md](EVALUATION_REPORT.md) for the full evaluation report, including detection metrics, OCR analysis, end-to-end evaluation, and inference latency.
-
-### Summary
-
-| Metric | Value | Notes |
-|---|---:|---|
-| Button detection mAP@50 | 99.15% | Held-out test set, 113 images |
-| Button detection mAP@50-95 | 73.59% | Held-out test set |
-| OCR floor-label accuracy | 66.62% | V1 eval, 689 instances |
-| End-to-end accuracy | 58.8% (10/17) | Production pipeline, 20-image sample (seed=42) |
-| YOLO-only latency | 76.45 ms/image | CPU, AMD Ryzen 5 5500U |
-| YOLO-only throughput | 13.1 FPS | CPU only; EasyOCR adds 0.5–1.5 s/button |
-
-> **Note on end-to-end accuracy:** The 58.8% figure is from a deterministic 20-image subset of the 113-image held-out test set (17 valid cases; 3 icon-only panels skipped), evaluated using the production `detect_floor.py` pipeline. It is **not** a full 113-image end-to-end evaluation. The 5-image qualitative demo (3/5 = 60%) is kept below as an illustrative example.
-
-### Detector (test set)
-
-| Metric | Value |
-|---|---|
-| Precision | 0.9882 |
-| Recall | 0.9931 |
-| mAP@50 | 0.9915 |
-| mAP@50-95 | 0.7359 |
-
-### OCR (experimental V1 evaluation — full test set, 113 images, 761 matched detections)
-
-> **Note:** These results are from the V1 OCR evaluation script (`scripts/ocr_evaluation.py`), which used a different preprocessing path (CLAHE + Otsu) than the production pipeline in `src/ocr.py`. They are reported for reference. A V2 evaluation run was started (`scripts/ocr_evaluation_v2.py`) but did not produce a full-test-set summary artifact. A precise end-to-end correct-floor count (correct / total) cannot be computed from stored artifacts without re-running the pipeline; only category-level accuracy percentages are available.
-
-| Metric | Value | Evaluated on |
-|---|---|---|
-| Raw OCR accuracy (all non-icon detections) | 65.57% | 700 non-icon crops |
-| Floor-label accuracy | 66.62% | 689 floor-label instances |
-| Single-digit floor accuracy | 56.53% | subset of 689 |
-| Multi-digit floor accuracy | 83.55% | subset of 689 |
-| B1/B2/B3 accuracy | 18.18% | subset of 689 |
-| Original orientation accuracy | 57.75% | 471 crops |
-| Flipped orientation accuracy | 81.66% | 229 crops |
-
-OCR is the primary performance bottleneck. The detector achieves near-perfect localization (mAP@50 = 0.9915); OCR accuracy varies substantially by floor label category. B1/B2/B3 recognition remains the weakest category.
-
-A quantitative end-to-end evaluation using the production pipeline (`detect_floor.py`) on a deterministic 20-image sample (seed=42) from the held-out test set yielded **10 / 17 = 58.8%** correct floor identifications (3 icon-only panels had no floor labels and were excluded). The 5-image `final_demo_results.csv` (3/5 target floors correctly matched) is retained as a qualitative demonstration only.
-
----
-
-## Limitations
-
-- **CPU-only:** Both YOLO inference and EasyOCR run on CPU. YOLO detection averages **76.45 ms/image** (72.8 ms neural-network inference + 3.65 ms pre/post-processing) at 13.1 FPS on an AMD Ryzen 5 5500U. EasyOCR recognition adds approximately 0.5–1.5 s per button crop, making OCR the dominant latency. GPU acceleration would be required for real-time use.
-- **Single-digit floors:** Small character size at typical crop resolutions reduces OCR confidence for floors 1–9.
-- **B1/B2/B3:** Character similarity between `B`, `8`, and common OCR noise tokens makes basement floor recognition the hardest category.
-- **Mirrored text:** Some elevator panels produce horizontally flipped text relative to the camera. The flipped-orientation pass mitigates but does not fully solve this.
-- **Braille interference:** Braille dots on button surfaces can confuse OCR. The lower-15%-masking heuristic reduces this but is imperfect.
-- **Illumination and reflections:** Specular reflections on metal buttons reduce text contrast.
-
----
-
-## Future Improvements
-
-- **Stronger OCR model or ensemble:** Replace EasyOCR with a scene-text model fine-tuned on elevator panel fonts, or ensemble EasyOCR with a secondary engine (e.g. Tesseract in single-character mode) to improve single-digit and B1/B2/B3 accuracy.
-- **Improved B1/B2/B3 handling:** The basement labels are the weakest category (18.18%). Post-processing with a character-level confusion model (B vs. 8, R vs. B, etc.) could improve recognition without hard-coded corrections.
-- **Better preprocessing for reflections and illumination:** Adaptive contrast methods beyond the current 3× upscale and lower-15% masking — such as polarisation-aware preprocessing or learned deglare — could reduce OCR failures on metallic reflective buttons.
-- **GPU acceleration:** Running both YOLO and EasyOCR on a GPU would reduce per-image latency by an order of magnitude, enabling near-real-time panel scanning for a deployed delivery robot.
-- **More diverse training data:** The dataset originates from a single elevator panel style. Collecting images from panels with different button shapes, fonts, languages, and lighting conditions would improve generalisation to unseen building deployments.
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Object detection | YOLOv8n (ultralytics) |
+| OCR | EasyOCR |
+| Backend API | FastAPI + Uvicorn |
+| Frontend | Next.js 15 + TypeScript + Tailwind CSS |
+| Image processing | OpenCV |
 
 ---
 
 ## Project Structure
 
 ```
-Lastmile Robotics/
-│
-├── README.md
-├── requirements.txt
-│
-├── detect_floor.py          # Main entry point: detect buttons + optional target-floor matching
-├── inference.py             # General inference: detect all buttons and report labels
-├── train.py                 # Reproducible training entry point
-│
-├── models/
-│   └── best.pt              # Trained YOLOv8n weights (mAP@50=0.9915)
-│
-├── src/
-│   ├── __init__.py
-│   ├── detector.py          # YOLO button detector (localization only)
-│   ├── ocr.py               # EasyOCR recognize() wrapper (4-pass pipeline)
-│   └── floor_selector.py    # Generic floor label selection and scoring
-│
-├── examples/
-│   ├── input/               # Sample input images
-│   └── output/              # Corresponding annotated outputs
-│
-├── dataset_button/          # Cleaned single-class dataset (nc=1)
-│   ├── data.yaml
-│   ├── preparation_report.md
-│   ├── train/               # 907 images
-│   ├── valid/               # 113 images
-│   ├── test/                # 113 images
-│   └── original_labels/     # Per-image original 38-class metadata (JSON)
-│
-├── scripts/                 # Experiment and evaluation scripts (preserved)
-│   ├── train_baseline.py
-│   ├── final_pipeline.py
-│   ├── demo.py
-│   ├── inspect_predictions.py
-│   ├── ocr_evaluation.py
-│   └── ocr_evaluation_v2.py
-│
-└── runs/
-    └── detect/
-        └── button_yolov8n_fast_baseline/   # Primary training run artifacts
-            ├── weights/
-            │   ├── best.pt
-            │   └── last.pt
-            ├── results.csv
-            ├── results.png
-            ├── confusion_matrix.png
-            ├── BoxPR_curve.png
-            ├── final_demo/
-            └── ocr_evaluation_v2/
+elevator-vision-ai-native/
+|-- detect_floor.py          # CLI entry point (unchanged)
+|-- inference.py             # Original all-buttons inference CLI
+|-- train.py                 # Model training script
+|-- data.yaml                # Dataset config
+|-- requirements.txt         # Core Python deps
+|
+|-- src/
+|   |-- detector.py          # YOLOv8 wrapper
+|   |-- ocr.py               # EasyOCR pipeline
+|   `-- floor_selector.py    # Floor label normaliser and voter
+|
+|-- models/
+|   `-- best.pt              # Trained YOLOv8n weights (~6 MB)
+|
+|-- backend/
+|   |-- main.py              # FastAPI application
+|   |-- requirements.txt     # Backend-specific deps
+|   `-- test_api.py          # API smoke test
+|
+|-- frontend/                # Next.js 15 app
+|   |-- src/app/
+|   |   |-- page.tsx         # Main UI page
+|   |   |-- layout.tsx       # App shell
+|   |   `-- globals.css      # Design tokens
+|   `-- .env.local           # API URL config
+|
+|-- examples/
+|   `-- input/               # Sample test images
+|
+|-- dataset_button/
+|   `-- test/                # Test split (kept for reproducibility)
+|
+|-- BUILD_WITH_AI.md         # AI-assisted development write-up
+|-- EVALUATION_REPORT.md     # Model evaluation metrics
+`-- .gitignore
 ```
+
+---
+
+## How to Run Locally
+
+### Prerequisites
+
+- Python 3.9+ with the existing venv (or install from requirements.txt)
+- Node.js 18+
+
+---
+
+### 1. Backend (FastAPI)
+
+```powershell
+# From project root, activate venv
+.\venv\Scripts\Activate.ps1
+
+# Install backend deps (one time only)
+pip install fastapi "uvicorn[standard]" python-multipart
+
+# Start the API server
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+The API will be available at http://localhost:8000.
+Swagger docs at http://localhost:8000/docs.
+
+---
+
+### 2. Frontend (Next.js)
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:3000 in your browser.
+
+---
+
+### 3. CLI (original, unchanged)
+
+```powershell
+.\venv\Scripts\Activate.ps1
+python detect_floor.py --image ".\examples\input\10_mp4-0011_jpg.rf.9174fb0023d67002761a4a000016f6c9.jpg" --target-floor "14"
+```
+
+---
+
+## API Documentation
+
+### GET /health
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+### POST /api/detect
+
+**Request:** multipart/form-data
+
+| Field | Type | Description |
+|-------|------|-------------|
+| image | file | JPEG / PNG / WebP, max 20 MB |
+| target_floor | string | Floor label, e.g. "14" or "B1" |
+
+**Response (target found):**
+
+```json
+{
+  "target_floor": "14",
+  "target_found": true,
+  "total_buttons_detected": 9,
+  "bbox": [501, 0, 640, 114],
+  "center": [570, 57],
+  "detection_confidence": 0.9029,
+  "ocr_confidence": 1.0,
+  "ocr_text": "14",
+  "annotated_image_url": "/api/result/abc123_annotated.jpg",
+  "all_buttons": [...]
+}
+```
+
+**Response (target not found):**
+
+```json
+{
+  "target_floor": "99",
+  "target_found": false,
+  "total_buttons_detected": 9,
+  "annotated_image_url": "/api/result/abc123_annotated.jpg",
+  "all_buttons": [...]
+}
+```
+
+---
+
+### GET /api/result/{filename}
+
+Serves the annotated output JPEG by filename. The filename comes from the
+`annotated_image_url` field in the POST /api/detect response.
+
+Only the basename is accepted -- path traversal attempts are rejected with HTTP 400.
+
+---
+
+## Example curl Request
+
+```bash
+curl -X POST http://localhost:8000/api/detect \
+  -F "image=@examples/input/10_mp4-0011_jpg.rf.9174fb0023d67002761a4a000016f6c9.jpg" \
+  -F "target_floor=14"
+```
+
+Smoke test (uses Python stdlib, no extra deps):
+
+```powershell
+.\venv\Scripts\python backend\test_api.py
+```
+
+---
+
+## Sample Result
+
+From the CLI and API using the included test image:
+
+```
+total_buttons_detected=9
+target_floor=14
+target_found=true
+bbox=[501, 0, 640, 114]
+center=[570, 57]
+detection_confidence=0.9029
+ocr_confidence=1.0
+ocr_text=14
+```
+
+---
+
+## Model Information
+
+| Property | Value |
+|----------|-------|
+| Architecture | YOLOv8n |
+| Task | Object detection (single class: button) |
+| Weights | models/best.pt (~6 MB) |
+| Input | Any resolution (auto-resized by ultralytics) |
+| Confidence threshold | 0.45 |
+| Training dataset | Custom Roboflow elevator button dataset |
+
+Full detector evaluation metrics (mAP, precision, recall) are in EVALUATION_REPORT.md.
+End-to-end OCR and floor-recognition accuracy depends on image quality and button legibility.
+
+---
+
+## Environment Variables
+
+| Variable | File | Default | Description |
+|----------|------|---------|-------------|
+| NEXT_PUBLIC_API_URL | frontend/.env.local | http://localhost:8000 | Backend URL |
+
+No API keys or secrets are required.
+
+---
+
+## Known Limitations
+
+- EasyOCR cold-start takes 15-45 seconds on first request (model loads on demand)
+- Supported floor labels: 1-30, B1, B2, B3 (configurable in src/floor_selector.py)
+- No GPU acceleration (CPU-only inference)
+- No inference queue -- concurrent requests will serialize
+- Annotated images persist in output/api_tmp/annotated/ until manually cleared
+
+---
+
+## AI-Assisted Development
+
+This prototype was built with assistance from the Antigravity AI coding tool.
+See BUILD_WITH_AI.md for a full write-up.
+
+---
+
+## Dataset Credit
+
+Dataset sourced from Roboflow. See README.dataset.txt and README.roboflow.txt for attribution.
