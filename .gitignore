@@ -1,0 +1,58 @@
+﻿# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment / secrets
+.env
+.env.*
+
+# Large training and validation image sets
+# Test data is intentionally kept for reproducibility.
+dataset_button/train/
+dataset_button/valid/
+
+# Original raw Roboflow training export
+train/
+
+# Base COCO pretrained weights
+# The trained submission model is models/best.pt.
+yolov8n.pt
+
+# Superseded training run
+runs/detect/button_yolov8n_baseline/
+
+# Duplicate validation/test evaluation runs
+runs/detect/button_yolov8n_fast_baseline_val/
+runs/detect/button_yolov8n_fast_baseline_test/
+
+# Unnecessary final checkpoint
+# best.pt is the submitted model.
+runs/detect/button_yolov8n_fast_baseline/weights/last.pt
+
+# Large intermediate button crops and prediction images
+runs/detect/button_yolov8n_fast_baseline/test_crops/
+runs/detect/button_yolov8n_fast_baseline/test_predictions/
+
+# Large OCR visualization dumps
+runs/detect/button_yolov8n_fast_baseline/ocr_evaluation/visualizations/
+runs/detect/button_yolov8n_fast_baseline/ocr_evaluation_v2/visualizations/
+
+# Python logs
+*.log
+
+
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
